@@ -8,7 +8,7 @@
 
 import express from "express";
 import multer from "multer";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { PDFDocument, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import fs from "fs";
@@ -23,14 +23,10 @@ const PORT = process.env.PORT || 3000;
 // 署名リンクに使う公開URL。ローカルなら http://localhost:3000
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// メール設定（環境変数で渡す。未設定ならコンソールに擬似送信）
-const SMTP = {
-  host: process.env.SMTP_HOST || "",
-  port: Number(process.env.SMTP_PORT || 587),
-  user: process.env.SMTP_USER || "",
-  pass: process.env.SMTP_PASS || "",
-  from: process.env.SMTP_FROM || process.env.SMTP_USER || "no-reply@example.com",
-};
+// メール設定（Resend。環境変数で渡す。未設定ならコンソールに擬似送信）
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+// 差出人。独自ドメイン未登録ならResendのテスト用 onboarding@resend.dev を使う
+const MAIL_FROM = process.env.SMTP_FROM || process.env.MAIL_FROM || "onboarding@resend.dev";
 
 // ---------- 保存ディレクトリ ----------
 const DATA_DIR = path.join(__dirname, "data");
@@ -55,19 +51,11 @@ function saveDB(db) {
 }
 
 // ---------- メール送信 ----------
-let transporter = null;
-if (SMTP.host && SMTP.user) {
-  transporter = nodemailer.createTransport({
-    host: SMTP.host,
-    port: SMTP.port,
-    secure: SMTP.port === 465,
-    auth: { user: SMTP.user, pass: SMTP.pass },
-  });
-}
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 async function sendMail(to, subject, html) {
-  if (!transporter) {
-    // SMTP未設定時はコンソールに出力（動作確認用）
+  if (!resend) {
+    // API未設定時はコンソールに出力（動作確認用）
     console.log("\n===== [擬似メール送信] =====");
     console.log("To:", to);
     console.log("Subject:", subject);
@@ -75,8 +63,17 @@ async function sendMail(to, subject, html) {
     console.log("============================\n");
     return;
   }
-  await transporter.sendMail({ from: SMTP.from, to, subject, html });
-  console.log(`メール送信済み → ${to}`);
+  const { data, error } = await resend.emails.send({
+    from: MAIL_FROM,
+    to,
+    subject,
+    html,
+  });
+  if (error) {
+    console.error(`メール送信失敗 → ${to}:`, error);
+    throw new Error(error.message || "メール送信に失敗しました");
+  }
+  console.log(`メール送信済み → ${to} (id: ${data?.id})`);
 }
 
 // ---------- ユーティリティ ----------
@@ -105,7 +102,15 @@ async function notifyNextSigner(env) {
     <hr>
     <p style="color:#888;font-size:12px">署名順: ${next.order + 1} / ${env.signers.length}</p>
   `;
-  await sendMail(next.email, `【署名依頼】${env.title}`, html);
+  // メール送信が失敗しても作成/署名処理自体は止めない（画面が固まらないように）
+  try {
+    await sendMail(next.email, `【署名依頼】${env.title}`, html);
+    next.mailError = null;
+  } catch (e) {
+    next.mailError = e.message;
+    env.auditLog.push({ time: nowISO(), event: "mail_error", detail: `${next.email} への送信失敗: ${e.message}` });
+    console.error("メール送信エラー:", e.message);
+  }
   return true;
 }
 
@@ -500,9 +505,14 @@ function pageStatus(env) {
   const rows = env.signers.map((s) => {
     const cls = s.status === "signed" ? "s-signed" : s.status === "sent" ? "s-sent" : "s-pending";
     const label = s.status === "signed" ? "署名済み" : s.status === "sent" ? "送信済み（署名待ち）" : "未送信";
+    // メール送信に失敗した場合、手動で共有できる署名リンクを表示
+    const errRow = s.mailError
+      ? `<br><span style="color:#c0392b;font-size:11px">メール送信失敗: ${escapeHtml(s.mailError)}</span>
+         <br><span class="muted" style="font-size:11px">手動共有リンク: <a href="${BASE_URL}/sign/${env.id}/${s.token}">${BASE_URL}/sign/${env.id}/${s.token}</a></span>`
+      : "";
     return `<tr>
       <td>${s.order + 1}</td>
-      <td>${escapeHtml(s.name)}<br><span class="muted">${escapeHtml(s.email)}</span></td>
+      <td>${escapeHtml(s.name)}<br><span class="muted">${escapeHtml(s.email)}</span>${errRow}</td>
       <td><span class="status-badge ${cls}">${label}</span></td>
       <td class="muted">${s.signedAt ? new Date(s.signedAt).toLocaleString("ja-JP") : "-"}</td>
     </tr>`;
@@ -538,5 +548,5 @@ function pageMessage(title, body) {
 
 app.listen(PORT, () => {
   console.log(`\n署名ツール起動: ${BASE_URL}`);
-  console.log(transporter ? "SMTP: 設定済み（実際にメール送信します）" : "SMTP: 未設定（メールはコンソールに擬似表示）");
+  console.log(resend ? "メール: Resend 設定済み（実際にメール送信します）" : "メール: 未設定（コンソールに擬似表示）");
 });

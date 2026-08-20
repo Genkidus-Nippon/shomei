@@ -1,0 +1,17 @@
+{
+  "name": "pdf-sign-tool",
+  "version": "1.0.0",
+  "description": "使い切りのPDF順次署名ツール",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.9.13",
+    "pdf-lib": "^1.17.1"
+  }
+}
